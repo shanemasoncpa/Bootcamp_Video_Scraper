@@ -40,3 +40,8 @@ login_debug.png
 .DS_Store
 Thumbs.db
 
+*.mkv
+*.avi
+*.mov
+videos/
+download/
