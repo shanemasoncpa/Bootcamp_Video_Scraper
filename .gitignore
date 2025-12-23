@@ -1,0 +1,42 @@
+# Environment and credentials
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+.venv/
+
+# Downloaded videos
+downloads/
+*.mp4
+*.webm
+*.mkv
+
+# Playwright
+playwright/.cache/
+
+# Session data
+cookies.json
+cookies_netscape.txt
+auth_state.json
+
+# Debug files
+*debug*.png
+login_debug.png
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
