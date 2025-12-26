@@ -7,8 +7,10 @@ Uses Playwright for authentication and yt-dlp for video downloading.
 """
 
 import argparse
+import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -49,6 +51,209 @@ def print_banner():
     print("\n" + "=" * 60)
     print("  Codecademy Bootcamp Video Downloader")
     print("=" * 60 + "\n")
+
+
+def check_ffmpeg():
+    """Check if ffmpeg is installed and accessible."""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        )
+        if result.returncode == 0:
+            # Extract version info
+            version_line = result.stdout.split('\n')[0] if result.stdout else "unknown"
+            print(f"  ffmpeg found: {version_line[:60]}")
+            return True
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"  Error checking ffmpeg: {e}")
+    
+    print("\n" + "=" * 60)
+    print("  WARNING: ffmpeg is NOT installed!")
+    print("=" * 60)
+    print("\n  ffmpeg is required to merge video and audio streams.")
+    print("  Without it, downloads will have separate audio/video files.\n")
+    print("  To install ffmpeg on Windows:")
+    print("    Option 1 (winget): winget install ffmpeg")
+    print("    Option 2 (choco):  choco install ffmpeg")
+    print("    Option 3: Download from https://ffmpeg.org/download.html")
+    print("\n  After installing, restart your terminal and run this script again.\n")
+    return False
+
+
+def merge_split_files(output_path, only_nums=None):
+    """
+    Find and merge any split audio/video files in the output directory.
+    This handles cases where ffmpeg wasn't available during download.
+    """
+    print("\n[*] Scanning for unmerged audio/video files...")
+    
+    # Pattern to match split files: Recording_XX.fhls-*.mp4
+    # Video files have patterns like: -1422.mp4, -1896.mp4 (numbers only)
+    # Audio files have patterns like: -audio-high-Original.mp4, -audio-high-English.mp4
+    
+    merged_count = 0
+
+    # Normalize filter set
+    only_set = None
+    if only_nums is not None:
+        if isinstance(only_nums, (list, tuple, set)):
+            only_set = {int(x) for x in only_nums}
+        else:
+            only_set = {int(only_nums)}
+
+    def _is_audio_candidate(suffix: str, ext: str) -> bool:
+        s = (suffix or "").lower()
+        e = (ext or "").lower()
+        if "audio" in s:
+            return True
+        return e in {"m4a", "aac", "mp3", "opus", "ogg", "wav"}
+
+    def _audio_score(suffix: str) -> int:
+        s = (suffix or "").lower()
+        # Prefer Original over English when both exist
+        if "original" in s:
+            return 3
+        if "english" in s:
+            return 2
+        return 1
+
+    def _video_score(suffix: str) -> int:
+        # Prefer higher numeric quality tokens like "-2378" if present
+        s = (suffix or "")
+        m = re.search(r"-(\d+)$", s)
+        return int(m.group(1)) if m else 0
+
+    # Find all candidate media files (video and audio can be .mp4, audio can be .m4a, etc.)
+    media_files = list(output_path.glob("Recording_*.*"))
+
+    # Group files by recording number
+    recordings = {}
+    for f in media_files:
+        # Match: Recording_02.<suffix>.<ext>  OR  Recording_02.<ext> (already merged)
+        m_split = re.match(r"Recording_(\d+)\.(.+)\.([A-Za-z0-9]+)$", f.name)
+        m_merged = re.match(r"Recording_(\d+)\.([A-Za-z0-9]+)$", f.name)
+
+        if m_split:
+            num = int(m_split.group(1))
+            if only_set is not None and num not in only_set:
+                continue
+            suffix = m_split.group(2)
+            ext = m_split.group(3)
+            if num not in recordings:
+                recordings[num] = {"videos": [], "audios": []}
+            if _is_audio_candidate(suffix, ext):
+                recordings[num]["audios"].append((f, suffix, ext))
+            else:
+                recordings[num]["videos"].append((f, suffix, ext))
+        elif m_merged:
+            # We'll handle "already merged" skipping below
+            continue
+    
+    # Also check for already merged files to skip
+    for f in output_path.glob("Recording_*.mp4"):
+        if re.match(r"Recording_\d+\.mp4$", f.name):
+            num = int(re.search(r"Recording_(\d+)\.mp4$", f.name).group(1))
+            if only_set is not None and num not in only_set:
+                continue
+            if num in recordings:
+                print(f"  Recording {num:02d}: Already merged, skipping")
+                del recordings[num]
+    
+    # Merge each pair
+    for num, files in sorted(recordings.items()):
+        if not files.get("videos") or not files.get("audios"):
+            if files.get("videos") and not files.get("audios"):
+                print(f"  Recording {num:02d}: Video only, no audio file found")
+            elif files.get("audios") and not files.get("videos"):
+                print(f"  Recording {num:02d}: Audio only, no video file found")
+            continue
+
+        # Choose best candidates
+        video_file, video_suffix, video_ext = sorted(
+            files["videos"], key=lambda t: _video_score(t[1]), reverse=True
+        )[0]
+        audio_file, audio_suffix, audio_ext = sorted(
+            files["audios"], key=lambda t: _audio_score(t[1]), reverse=True
+        )[0]
+        
+        # Check for .part files (incomplete downloads)
+        if (output_path / f"{audio_file.name}.part").exists():
+            print(f"  Recording {num:02d}: Audio still downloading (.part file exists), skipping")
+            continue
+        if (output_path / f"{video_file.name}.part").exists():
+            print(f"  Recording {num:02d}: Video still downloading (.part file exists), skipping")
+            continue
+        
+        output_file = output_path / f"Recording_{num:02d}.mp4"
+        
+        print(f"  Recording {num:02d}: Merging video + audio...")
+        print(f"    Video: {video_file.name}")
+        print(f"    Audio: {audio_file.name}")
+        
+        # Use ffmpeg to merge
+        cmd = [
+            "ffmpeg",
+            "-y",  # Overwrite output
+            "-hide_banner",
+            "-loglevel", "error",
+            "-i", str(video_file),
+            "-i", str(audio_file),
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "copy",  # Copy video codec (no re-encoding)
+            "-c:a", "aac",   # Encode audio to AAC for compatibility
+            "-b:a", "192k",  # Audio bitrate
+            "-strict", "experimental",
+            "-shortest",
+            "-movflags", "+faststart",
+            str(output_file)
+        ]
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            )
+            
+            if result.returncode == 0 and output_file.exists():
+                # Verify the output file is reasonable size
+                if output_file.stat().st_size > 1000000:  # > 1MB
+                    print(f"    ✓ Merged successfully: {output_file.name}")
+                    
+                    # Remove the split files
+                    video_file.unlink()
+                    audio_file.unlink()
+                    print(f"    ✓ Cleaned up split files")
+                    merged_count += 1
+                else:
+                    print(f"    ✗ Merge produced invalid file, keeping originals")
+                    output_file.unlink()
+            else:
+                print(f"    ✗ Merge failed: {result.stderr[:200] if result.stderr else 'Unknown error'}")
+                
+        except Exception as e:
+            print(f"    ✗ Error during merge: {e}")
+    
+    # Clean up any .ytdl temp files
+    for ytdl_file in output_path.glob("*.ytdl"):
+        try:
+            ytdl_file.unlink()
+        except:
+            pass
+    
+    if merged_count > 0:
+        print(f"\n  Successfully merged {merged_count} recording(s)")
+    else:
+        print(f"\n  No files needed merging")
+    
+    return merged_count
 
 
 def check_credentials():
@@ -374,20 +579,44 @@ def check_already_downloaded(output_path, video_num):
     return False
 
 
-def download_recordings(start_num, end_num, headless=False, force=False):
+def download_recordings(start_num, end_num, headless=False, force=False, merge_only=False, allow_split=False):
     """
     Main function to download a range of recordings.
     """
     print_banner()
     
-    # Check credentials
-    if not check_credentials():
-        return False
+    # Check for ffmpeg
+    print("[0/4] Checking dependencies...")
+    ffmpeg_available = check_ffmpeg()
     
     # Create output directory
     output_path = SCRIPT_DIR / OUTPUT_DIR
     output_path.mkdir(exist_ok=True)
-    print(f"Output directory: {output_path}")
+    print(f"\nOutput directory: {output_path}")
+    
+    # If merge_only mode, just merge existing files and exit
+    if merge_only:
+        if not ffmpeg_available:
+            print("\nError: Cannot merge files without ffmpeg installed!")
+            return False
+        merge_split_files(output_path)
+        return True
+
+    # Typical behavior: require ffmpeg so outputs are always merged MP4s.
+    # Users can override with --allow-split to keep separate audio/video files.
+    if not ffmpeg_available and not allow_split:
+        print("\n" + "=" * 60)
+        print("  ERROR: ffmpeg is required for normal downloads")
+        print("=" * 60)
+        print("\n  This script downloads best-quality streams, which are often split")
+        print("  into separate video+audio files unless ffmpeg is available to merge them.")
+        print("\n  Fix: Install ffmpeg and restart your terminal, then re-run the script.")
+        print("  Or:  Re-run with --allow-split to keep separate audio/video files.\n")
+        return False
+    
+    # Check credentials
+    if not check_credentials():
+        return False
     
     # Track results
     successful = []
@@ -463,6 +692,9 @@ def download_recordings(start_num, end_num, headless=False, force=False):
             referer = recording_url if needs_referer else None
             if download_video_with_ytdlp(video_url, output_path, cookies_file, num, referer):
                 successful.append(num)
+                # If user interrupted later, we still want completed recordings merged.
+                if ffmpeg_available:
+                    merge_split_files(output_path, only_nums=num)
             else:
                 failed.append(num)
         
@@ -483,6 +715,19 @@ def download_recordings(start_num, end_num, headless=False, force=False):
         print(f"    {failed}")
     print(f"\nVideos saved to: {output_path}")
     
+    # Post-download: merge any remaining split files if ffmpeg is available
+    if ffmpeg_available:
+        merge_split_files(output_path)
+    elif allow_split:
+        # Check if there are split files that need merging
+        split_files = list(output_path.glob("Recording_*.fhls-*.mp4"))
+        if split_files:
+            print("\n" + "=" * 60)
+            print("  NOTE: Split audio/video files detected!")
+            print("=" * 60)
+            print(f"  {len(split_files)} split files found that need merging.")
+            print("  Install ffmpeg and run: python downloader.py --merge")
+    
     return len(failed) == 0
 
 
@@ -497,12 +742,14 @@ Examples:
   python downloader.py --video 5             Download only recording 5
   python downloader.py --start 10 --end 15   Download recordings 10-15
   python downloader.py --start 1 --end 5 --force   Re-download even if exists
+  python downloader.py --merge               Merge any split audio/video files
 
 Setup:
   1. Install dependencies: pip install -r requirements.txt
   2. Install Playwright browser: playwright install chromium
-  3. Copy env.example.txt to .env and add your credentials
-  4. Run the script with desired video range
+  3. Install ffmpeg: winget install ffmpeg (or choco install ffmpeg)
+  4. Copy env.example.txt to .env and add your credentials
+  5. Run the script with desired video range
         """
     )
     
@@ -517,6 +764,11 @@ Setup:
         "--start", "-s",
         type=int,
         help="Starting video number (use with --end)"
+    )
+    group.add_argument(
+        "--merge", "-m",
+        action="store_true",
+        help="Merge any split audio/video files (requires ffmpeg)"
     )
     
     parser.add_argument(
@@ -537,8 +789,23 @@ Setup:
         action="store_true",
         help="Force re-download even if video already exists"
     )
+
+    parser.add_argument(
+        "--allow-split",
+        action="store_true",
+        help="Allow downloads without ffmpeg (leaves separate audio/video files)"
+    )
     
     args = parser.parse_args()
+    
+    # Handle merge-only mode
+    if args.merge:
+        success = download_recordings(
+            start_num=0,
+            end_num=0,
+            merge_only=True
+        )
+        sys.exit(0 if success else 1)
     
     # Validate arguments
     if args.video:
@@ -560,7 +827,8 @@ Setup:
         start_num=start_num,
         end_num=end_num,
         headless=args.headless,
-        force=args.force
+        force=args.force,
+        allow_split=args.allow_split
     )
     
     sys.exit(0 if success else 1)
@@ -568,4 +836,3 @@ Setup:
 
 if __name__ == "__main__":
     main()
-

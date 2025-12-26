@@ -84,6 +84,18 @@ python downloader.py --video 5
 python downloader.py --start 1 --end 25
 ```
 
+### Merge split audio/video files (repair)
+
+If you previously downloaded recordings without ffmpeg installed (or if a run was interrupted), you may have separate audio/video files like:
+- `Recording_02.fhls-....mp4` (video)
+- `Recording_02.fhls-...audio-high-....mp4` (audio)
+
+After installing ffmpeg (and restarting your terminal), merge everything into `Recording_XX.mp4` with:
+
+```powershell
+python downloader.py --merge
+```
+
 ### Force Re-download (even if file exists)
 
 ```powershell
@@ -94,6 +106,16 @@ python downloader.py --start 1 --end 5 --force
 
 ```powershell
 python downloader.py --start 1 --end 10 --headless
+```
+
+### Download without ffmpeg (not recommended)
+
+By default, this script **requires ffmpeg** so that normal downloads always end as a single merged `Recording_XX.mp4`.
+
+If you *really* want to download without ffmpeg (leaving separate audio/video files), run:
+
+```powershell
+python downloader.py --start 1 --end 10 --allow-split
 ```
 
 ## Output
@@ -140,6 +162,12 @@ ffmpeg -version
 ```
 
 If not found, install it (see Installation section) and restart your terminal.
+
+If you already downloaded split files, run:
+
+```powershell
+python downloader.py --merge
+```
 
 ### "Already logged in" but Download Fails
 
